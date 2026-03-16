@@ -1,12 +1,9 @@
-import time, os, math, json, hashlib, uuid
+import time, hashlib, uuid
 from typing import List, Dict, Tuple
 import numpy as np
 from .settings import settings
 from .ingest import chunk_text, doc_hash
 from qdrant_client import QdrantClient, models as qm
-
-def _tokenize(s: str) -> List[str]:
-    return [t.lower() for t in s.split()]
 
 class LocalEmbedder:
     def __init__(self, dim: int = 384):
@@ -17,8 +14,7 @@ class LocalEmbedder:
         rng_seed = int.from_bytes(h[:8], "big") % (2**32-1)
         rng = np.random.default_rng(rng_seed)
         v = rng.standard_normal(self.dim).astype("float32")
-        v = v / (np.linalg.norm(v) + 1e-9)
-        return v
+        return v / (np.linalg.norm(v) + 1e-9)
 
 class InMemoryStore:
     def __init__(self, dim: int = 384):
@@ -27,7 +23,7 @@ class InMemoryStore:
         self.meta: List[Dict] = []
         self._hashes = set()
 
-    def upsert(self, vectors: List[np.ndarray], metadatas: List[Dict]):
+    def upsert(self, vectors, metadatas):
         for v, m in zip(vectors, metadatas):
             h = m.get("hash")
             if h and h in self._hashes:
@@ -37,7 +33,7 @@ class InMemoryStore:
             if h:
                 self._hashes.add(h)
 
-    def search(self, query: np.ndarray, k: int = 4) -> List[Tuple[float, Dict]]:
+    def search(self, query, k=4):
         if not self.vecs:
             return []
         A = np.vstack(self.vecs)
@@ -62,15 +58,14 @@ class QdrantStore:
                 vectors_config=qm.VectorParams(size=self.dim, distance=qm.Distance.COSINE)
             )
 
-    def upsert(self, vectors: List[np.ndarray], metadatas: List[Dict]):
+    def upsert(self, vectors, metadatas):
         points = []
         for i, (v, m) in enumerate(zip(vectors, metadatas)):
-            # Use UUID5 so Qdrant accepts it as a valid point ID
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, m.get("hash") or str(i)))
             points.append(qm.PointStruct(id=point_id, vector=v.tolist(), payload=m))
         self.client.upsert(collection_name=self.collection, points=points)
 
-    def search(self, query: np.ndarray, k: int = 4) -> List[Tuple[float, Dict]]:
+    def search(self, query, k=4):
         res = self.client.search(
             collection_name=self.collection,
             query_vector=query.tolist(),
@@ -83,28 +78,43 @@ class StubLLM:
     def generate(self, query: str, contexts: List[Dict]) -> str:
         lines = ["Answer (stub): Based on the following sources:"]
         for c in contexts:
-            sec = c.get("section") or "Section"
-            lines.append(f"- {c.get('title')} — {sec}")
+            lines.append(f"- {c.get('title')} — {c.get('section')}")
         lines.append("Summary:")
         joined = " ".join([c.get("text", "") for c in contexts])
-        lines.append(joined[:600] + ("..." if len(joined) > 600 else ""))
+        lines.append(joined[:600])
         return "\n".join(lines)
 
 class OpenRouterLLM:
     def __init__(self, api_key: str, model: str = "openai/gpt-4o-mini"):
         from openai import OpenAI
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-        )
+        self.client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
         self.model = model
 
     def generate(self, query: str, contexts: List[Dict]) -> str:
-        prompt = "You are a helpful company policy assistant. Cite sources by title and section when relevant.\n"
+        prompt = "You are a helpful company policy assistant. Cite sources by title and section.\n"
         prompt += f"Question: {query}\nSources:\n"
         for c in contexts:
             prompt += f"- {c.get('title')} | {c.get('section')}\n{c.get('text')[:600]}\n---\n"
-        prompt += "Write a concise, accurate answer grounded in the sources. If unsure, say so."
+        prompt += "Write a concise accurate answer grounded in the sources."
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        return resp.choices[0].message.content
+
+class GroqLLM:
+    def __init__(self, api_key: str, model: str = "llama-3.1-8b-instant"):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        self.model = model
+
+    def generate(self, query: str, contexts: List[Dict]) -> str:
+        prompt = "You are a helpful company policy assistant. Cite sources by title and section.\n"
+        prompt += f"Question: {query}\nSources:\n"
+        for c in contexts:
+            prompt += f"- {c.get('title')} | {c.get('section')}\n{c.get('text')[:600]}\n---\n"
+        prompt += "Write a concise accurate answer grounded in the sources."
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
@@ -142,12 +152,16 @@ class RAGEngine:
         else:
             self.store = InMemoryStore(dim=384)
 
-        if settings.llm_provider == "openrouter" and settings.openrouter_api_key:
+        if settings.llm_provider == "groq" and settings.groq_api_key:
             try:
-                self.llm = OpenRouterLLM(
-                    api_key=settings.openrouter_api_key,
-                    model=settings.llm_model,
-                )
+                self.llm = GroqLLM(api_key=settings.groq_api_key, model=settings.llm_model)
+                self.llm_name = f"groq:{settings.llm_model}"
+            except Exception:
+                self.llm = StubLLM()
+                self.llm_name = "stub"
+        elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
+            try:
+                self.llm = OpenRouterLLM(api_key=settings.openrouter_api_key, model=settings.llm_model)
                 self.llm_name = f"openrouter:{settings.llm_model}"
             except Exception:
                 self.llm = StubLLM()
@@ -161,20 +175,13 @@ class RAGEngine:
         self._chunk_count = 0
 
     def ingest_chunks(self, chunks: List[Dict]) -> Tuple[int, int]:
-        vectors = []
-        metas = []
+        vectors, metas = [], []
         doc_titles_before = set(self._doc_titles)
         for ch in chunks:
             text = ch["text"]
             h = doc_hash(text)
-            meta = {
-                "hash": h,
-                "title": ch["title"],
-                "section": ch.get("section"),
-                "text": text,
-            }
-            v = self.embedder.embed(text)
-            vectors.append(v)
+            meta = {"hash": h, "title": ch["title"], "section": ch.get("section"), "text": text}
+            vectors.append(self.embedder.embed(text))
             metas.append(meta)
             self._doc_titles.add(ch["title"])
             self._chunk_count += 1
@@ -183,8 +190,7 @@ class RAGEngine:
 
     def retrieve(self, query: str, k: int = 4) -> List[Dict]:
         t0 = time.time()
-        qv = self.embedder.embed(query)
-        results = self.store.search(qv, k=k)
+        results = self.store.search(self.embedder.embed(query), k=k)
         self.metrics.add_retrieval((time.time()-t0)*1000.0)
         return [meta for score, meta in results]
 
@@ -195,13 +201,12 @@ class RAGEngine:
         return answer
 
     def stats(self) -> Dict:
-        m = self.metrics.summary()
         return {
             "total_docs": len(self._doc_titles),
             "total_chunks": self._chunk_count,
             "embedding_model": settings.embedding_model,
             "llm_model": self.llm_name,
-            **m
+            **self.metrics.summary()
         }
 
 def build_chunks_from_docs(docs: List[Dict], chunk_size: int, overlap: int) -> List[Dict]:
