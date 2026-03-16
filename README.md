@@ -38,7 +38,10 @@ cd ai-policy-helper-starter-pack
 
 # 2. Copy env file and add your Groq key
 cp .env.example .env
-nano .env  # Set GROQ_API_KEY=your-key-here
+
+# Get your FREE Groq API key at: https://console.groq.com/keys
+# Sign up → API Keys → Create Key → Copy it
+nano .env  # Replace GROQ_API_KEY=your-groq-api-key-here with your real key
 
 # 3. Start all services
 docker compose up --build
