@@ -1,11 +1,10 @@
-import time, os, math, json, hashlib
+import time, os, math, json, hashlib, uuid
 from typing import List, Dict, Tuple
 import numpy as np
 from .settings import settings
 from .ingest import chunk_text, doc_hash
 from qdrant_client import QdrantClient, models as qm
 
-# ---- Simple local embedder (deterministic) ----
 def _tokenize(s: str) -> List[str]:
     return [t.lower() for t in s.split()]
 
@@ -14,16 +13,13 @@ class LocalEmbedder:
         self.dim = dim
 
     def embed(self, text: str) -> np.ndarray:
-        # Hash-based repeatable pseudo-embedding
         h = hashlib.sha1(text.encode("utf-8")).digest()
         rng_seed = int.from_bytes(h[:8], "big") % (2**32-1)
         rng = np.random.default_rng(rng_seed)
         v = rng.standard_normal(self.dim).astype("float32")
-        # L2 normalize
         v = v / (np.linalg.norm(v) + 1e-9)
         return v
 
-# ---- Vector store abstraction ----
 class InMemoryStore:
     def __init__(self, dim: int = 384):
         self.dim = dim
@@ -44,9 +40,8 @@ class InMemoryStore:
     def search(self, query: np.ndarray, k: int = 4) -> List[Tuple[float, Dict]]:
         if not self.vecs:
             return []
-        A = np.vstack(self.vecs)  # [N, d]
-        q = query.reshape(1, -1)  # [1, d]
-        # cosine similarity
+        A = np.vstack(self.vecs)
+        q = query.reshape(1, -1)
         sims = (A @ q.T).ravel() / (np.linalg.norm(A, axis=1) * (np.linalg.norm(q) + 1e-9) + 1e-9)
         idx = np.argsort(-sims)[:k]
         return [(float(sims[i]), self.meta[i]) for i in idx]
@@ -70,7 +65,9 @@ class QdrantStore:
     def upsert(self, vectors: List[np.ndarray], metadatas: List[Dict]):
         points = []
         for i, (v, m) in enumerate(zip(vectors, metadatas)):
-            points.append(qm.PointStruct(id=m.get("id") or m.get("hash") or i, vector=v.tolist(), payload=m))
+            # Use UUID5 so Qdrant accepts it as a valid point ID
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, m.get("hash") or str(i)))
+            points.append(qm.PointStruct(id=point_id, vector=v.tolist(), payload=m))
         self.client.upsert(collection_name=self.collection, points=points)
 
     def search(self, query: np.ndarray, k: int = 4) -> List[Tuple[float, Dict]]:
@@ -80,20 +77,15 @@ class QdrantStore:
             limit=k,
             with_payload=True
         )
-        out = []
-        for r in res:
-            out.append((float(r.score), dict(r.payload)))
-        return out
+        return [(float(r.score), dict(r.payload)) for r in res]
 
-# ---- LLM provider ----
 class StubLLM:
     def generate(self, query: str, contexts: List[Dict]) -> str:
-        lines = [f"Answer (stub): Based on the following sources:"]
+        lines = ["Answer (stub): Based on the following sources:"]
         for c in contexts:
             sec = c.get("section") or "Section"
             lines.append(f"- {c.get('title')} — {sec}")
         lines.append("Summary:")
-        # naive summary of top contexts
         joined = " ".join([c.get("text", "") for c in contexts])
         lines.append(joined[:600] + ("..." if len(joined) > 600 else ""))
         return "\n".join(lines)
@@ -108,18 +100,18 @@ class OpenRouterLLM:
         self.model = model
 
     def generate(self, query: str, contexts: List[Dict]) -> str:
-        prompt = f"You are a helpful company policy assistant. Cite sources by title and section when relevant.\nQuestion: {query}\nSources:\n"
+        prompt = "You are a helpful company policy assistant. Cite sources by title and section when relevant.\n"
+        prompt += f"Question: {query}\nSources:\n"
         for c in contexts:
             prompt += f"- {c.get('title')} | {c.get('section')}\n{c.get('text')[:600]}\n---\n"
         prompt += "Write a concise, accurate answer grounded in the sources. If unsure, say so."
         resp = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.1
         )
         return resp.choices[0].message.content
 
-# ---- RAG Orchestrator & Metrics ----
 class Metrics:
     def __init__(self):
         self.t_retrieval = []
@@ -142,7 +134,6 @@ class Metrics:
 class RAGEngine:
     def __init__(self):
         self.embedder = LocalEmbedder(dim=384)
-        # Vector store selection
         if settings.vector_store == "qdrant":
             try:
                 self.store = QdrantStore(collection=settings.collection_name, dim=384)
@@ -151,7 +142,6 @@ class RAGEngine:
         else:
             self.store = InMemoryStore(dim=384)
 
-        # LLM selection
         if settings.llm_provider == "openrouter" and settings.openrouter_api_key:
             try:
                 self.llm = OpenRouterLLM(
@@ -174,12 +164,10 @@ class RAGEngine:
         vectors = []
         metas = []
         doc_titles_before = set(self._doc_titles)
-
         for ch in chunks:
             text = ch["text"]
             h = doc_hash(text)
             meta = {
-                "id": h,
                 "hash": h,
                 "title": ch["title"],
                 "section": ch.get("section"),
@@ -190,7 +178,6 @@ class RAGEngine:
             metas.append(meta)
             self._doc_titles.add(ch["title"])
             self._chunk_count += 1
-
         self.store.upsert(vectors, metas)
         return (len(self._doc_titles) - len(doc_titles_before), len(metas))
 
@@ -217,7 +204,6 @@ class RAGEngine:
             **m
         }
 
-# ---- Helpers ----
 def build_chunks_from_docs(docs: List[Dict], chunk_size: int, overlap: int) -> List[Dict]:
     out = []
     for d in docs:
