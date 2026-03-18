@@ -36,9 +36,9 @@ A local-first RAG (Retrieval-Augmented Generation) chatbot that answers question
 git clone https://github.com/dark9TLight/ai-policy-helper-starter-pack.git
 cd ai-policy-helper-starter-pack
 
-# Get your FREE Groq API key at: https://console.groq.com/keys
+# Get your FREE OpenRouter API key at: https://openrouter.ai/settings/keys
 # Sign up → API Keys → Create Key → Copy it
-nano .env  # Replace GROQ_API_KEY=your-groq-api-key-here with your real key
+nano .env  # Replace OPENROUTER_API_KEY=your-openrouter-api-key-here with your real key
 
 # 2. Start all services
 docker compose up --build
