@@ -36,14 +36,11 @@ A local-first RAG (Retrieval-Augmented Generation) chatbot that answers question
 git clone https://github.com/dark9TLight/ai-policy-helper-starter-pack.git
 cd ai-policy-helper-starter-pack
 
-# 2. Copy env file and add your Groq key
-cp .env.example .env
-
 # Get your FREE Groq API key at: https://console.groq.com/keys
 # Sign up → API Keys → Create Key → Copy it
 nano .env  # Replace GROQ_API_KEY=your-groq-api-key-here with your real key
 
-# 3. Start all services
+# 2. Start all services
 docker compose up --build
 ```
 
